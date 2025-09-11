@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>PSK Prop Radius Map</title>
+  <style>
+    /* Compact, clean UI (as in your “quite good” version) */
+    html, body { height:100%; margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #map { position: fixed; inset: 0; width: 100vw; height: 100vh; background:#eaeaea; cursor: grab; }
+    #map.dragging { cursor: grabbing; }
+
+    #toolbar { position: fixed; top: 10px; left: 10px; z-index: 1000; background: rgba(255,255,255,0.95);
+      padding: 10px 12px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+    .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+    label { font-size:12px; }
+    .row input, .row select { font-size:12px; padding:4px 6px; border:1px solid #ddd; border-radius:6px; }
+    button { background:#111; color:#fff; border:none; padding:8px 10px; border-radius:10px; cursor:pointer; transition:.15s; }
+    #apply.dirty { background:#eab308; color:#111; box-shadow:0 0 0 2px rgba(0,0,0,.15) inset; }
+
+    .legend { font-size:12px; line-height:1.6; display:flex; flex-wrap:wrap; gap:10px 14px; }
+    .legend-row { display:flex; align-items:center; gap:10px; margin-top:6px; min-width:540px; }
+    .count { margin-left:auto; font-size:12px; opacity:.8; }
+    .band-toggle { display:inline-flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
+    .band-toggle input { display:none; }
+    .band-swatch { width:12px; height:12px; border-radius:50%; border:1px solid rgba(0,0,0,.25); display:inline-block; }
+    .band-toggle input + .band-swatch { opacity:.35; transform:scale(.95); }
+    .band-toggle input ~ .band-label { opacity:.6; }
+    .band-toggle input:checked + .band-swatch { opacity:1; box-shadow:0 0 0 2px rgba(0,0,0,.25) inset, 0 0 0 1px rgba(0,0,0,.2); transform:none; }
+    .band-toggle input:checked ~ .band-label { opacity:1; font-weight:600; }
+
+    #statusbar { position:fixed; bottom:10px; left:10px; z-index:1000; background:rgba(255,230,230,.95); color:#900;
+      padding:6px 10px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.08); display:none; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+  <!-- Robinson & other projections -->
+  <script src="https://cdn.jsdelivr.net/npm/d3-geo-projection@4"></script>
+</head>
+<body>
+  <div id="toolbar">
+    <div class="row">
+      <label for="home">Home grid:</label><input id="home" value="KP20" size="6"/>
+      <label for="radius">Radius (km):</label><input id="radius" type="number" min="50" max="20000" value="400" step="50" size="5"/>
+      <label for="age">Age (max):</label><input id="age" type="number" min="5" max="180" value="15" size="4"/>
+      <label for="proj" style="margin-left:8px;">Projection:</label>
+      <select id="proj">
+        <option value="aeqd">Great Circle</option>
+        <option value="robinson" selected>Robinson</option>
+        <option value="mercator">Mercator</option>
+      </select>
+      <label style="margin-left:8px;">Land:</label>
+      <input id="landfill" type="color" value="#dfe7ee" title="Land fill"/>
+      <input id="landstroke" type="color" value="#9db6c7" title="Land outline">
+      <button id="apply" style="margin-left:8px;">Apply</button>
+    </div>
+    <div class="legend-row">
+      <div class="legend" id="legend"></div>
+      <span id="count" class="count"></span>
+    </div>
+  </div>
+
+  <canvas id="map"></canvas>
+  <div id="statusbar"></div>
+  <div id="tooltip" style="position:fixed; pointer-events:none; background:rgba(0,0,0,.8); color:#fff; font:12px system-ui; padding:6px 8px; border-radius:8px; display:none; z-index:2000;"></div>
+
+<script>
+(function(){
+const R_EARTH_KM = 6371.0088;
+const BANDS_ORDER = ["160m","80m","40m","30m","20m","17m","15m","12m","10m","6m"];
+
+let COLORS = {};
+let homeLatLon = [0,0];   // [lat, lon]
+let dots = [];
+let evtSrc = null;
+let LAND = null;
+
+/* View state per projection (mouse-wheel zoom & drag-pan) */
+const VIEW_KEYS = {
+  aeqd:     'pskprop.view.aeqd',
+  robinson: 'pskprop.view.robinson',
+  mercator: 'pskprop.view.mercator',
+};
+let view = { z: 1, dx: 0, dy: 0 }; // z=scale multiplier; dx/dy in pixels
+function loadView(kind){
+  try{
+    const j = localStorage.getItem(VIEW_KEYS[kind]);
+    if(j){ view = JSON.parse(j); return; }
+  }catch(e){}
+  view = { z: 1, dx: 0, dy: 0 };
+}
+function saveView(kind){
+  try{ localStorage.setItem(VIEW_KEYS[kind], JSON.stringify(view)); }catch(e){}
+}
+
+function sb(){ return document.getElementById('statusbar'); }
+function showError(msg){ const el=sb(); if(!el)return; el.textContent=String(msg); el.style.display='inline-block'; }
+function hideError(){ const el=sb(); if(!el)return; el.style.display='none'; }
+function getLandColors(){ return { fill: landfill.value || '#dfe7ee', stroke: landstroke.value || '#9db6c7' }; }
+function currentAgeMinutes(){ const a = Number(age.value); return isNaN(a)?15:a; }
+function unixNow(){ return Date.now()/1000; }
+function tsToUnix(t){ if(t==null)return null; if(typeof t==='number') return t>1e12 ? t/1000 : t; const d=Date.parse(t); return isNaN(d)?null:d/1000; }
+
+function loadLocalPrefs(){
+  try{
+    const f = localStorage.getItem('pskprop.land.fill'); if(f) landfill.value = f;
+    const s = localStorage.getItem('pskprop.land.stroke'); if(s) landstroke.value = s;
+  }catch(e){}
+}
+function saveLandColors(){
+  try{
+    localStorage.setItem('pskprop.land.fill', landfill.value);
+    localStorage.setItem('pskprop.land.stroke', landstroke.value);
+  }catch(e){}
+}
+
+let DIRTY=false;
+function markDirty(){ DIRTY=true; apply.classList.add('dirty'); }
+function clearDirty(){ DIRTY=false; apply.classList.remove('dirty'); }
+
+function makeLegend(colors, selected){
+  const el=document.getElementById('legend');
+  selected = selected || BANDS_ORDER;
+  el.innerHTML = BANDS_ORDER.map(b=>{
+    const c = colors[b] || '#666';
+    const checked = selected.includes(b) ? 'checked' : '';
+    return `<label class="band-toggle"><input type="checkbox" data-band="${b}" ${checked}/><span class="band-swatch" style="background:${c}"></span><span class="band-label">${b}</span></label>`;
+  }).join("");
+  el.querySelectorAll('input[type=checkbox]').forEach(inp=>inp.addEventListener('change', markDirty));
+}
+function getSelectedBands(){
+  return Array.from(document.querySelectorAll('#legend input[type=checkbox]')).filter(i=>i.checked).map(i=>i.dataset.band);
+}
+
+/* ---- Config + Land ---- */
+async function loadConfig(){
+  const r = await fetch('/config',{cache:'no-store'});
+  const cfg = await r.json();
+  COLORS = cfg.band_colors; makeLegend(COLORS, cfg.bands);
+  homeLatLon = cfg.home_latlon;
+  home.value   = cfg.home_locator;
+  radius.value = cfg.radius_km;
+  age.value    = cfg.age_minutes;
+  proj.value   = cfg.map_type || 'robinson';
+  clearDirty(); return cfg;
+}
+async function loadLand(){
+  const url = 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json';
+  const r = await fetch(url, {cache:'no-store'});
+  const topo = await r.json();
+  LAND = topojson.feature(topo, topo.objects.land);
+}
+
+/* ---- Projections (with view z,dx,dy) ---- */
+function makeProjection(kind, w, h){
+  const lon0 = homeLatLon[1], lat0 = homeLatLon[0];
+  const margin = 12;
+  const z = view.z || 1;
+  const dx = view.dx || 0, dy = view.dy || 0;
+
+  if(kind === 'robinson'){
+    // Robinson via d3-geo-projection
+    const prj = d3.geoRobinson().rotate([-lon0, 0]);
+    prj.fitExtent([[margin, margin],[w - margin, h - margin]], LAND);
+    prj.scale(prj.scale() * z);
+    const t = prj.translate(); prj.translate([t[0] + dx, t[1] + dy]);
+    return prj;
+  }
+  if(kind === 'mercator'){
+    const prj = d3.geoMercator().rotate([-lon0, 0]);
+    prj.fitExtent([[margin, margin],[w - margin, h - margin]], LAND);
+    prj.scale(prj.scale() * z);
+    const t = prj.translate(); prj.translate([t[0] + dx, t[1] + dy]);
+    return prj;
+  }
+  // AEQD: per-radian base so π radians (~20,037 km) reaches edge when z=1
+  const baseK = (Math.min(w,h)/2 - 16) / Math.PI;
+  return d3.geoAzimuthalEquidistant()
+    .rotate([-lon0, -lat0])      // look at home lat/lon
+    .translate([w/2 + dx, h/2 + dy])
+    .clipAngle(179.8)
+    .scale(baseK * z);
+}
+
+function drawLandD3(ctx, w, h, kind){
+  if(!LAND) return null;
+  const prj  = makeProjection(kind, w, h);
+  const path = d3.geoPath().projection(prj).context(ctx);
+  const LC   = getLandColors();
+
+  ctx.save();
+  ctx.beginPath();
+  path(LAND);
+  ctx.fillStyle = LC.fill;
+  try { ctx.fill('evenodd'); } catch(_) { ctx.fill(); }
+  ctx.strokeStyle = LC.stroke;
+  ctx.lineWidth = 0.6;
+  ctx.stroke();
+  ctx.restore();
+
+  return { project: ([lon,lat]) => prj([lon,lat]), projection: prj };
+}
+
+function drawAeqdRings(ctx, adapter){
+  const prj = adapter.projection;
+  const maxKm = Math.max(50, Number(radius.value)||400);
+  let step = 1000; if (maxKm < 1000) step = 100; if (maxKm < 200) step = 50;
+
+  const lon0 = homeLatLon[1], lat0 = homeLatLon[0];
+  ctx.save();
+  ctx.strokeStyle = 'rgba(100,150,255,0.55)';
+  ctx.lineWidth = 1;
+
+  for(let r=step; r<=maxKm; r+=step){
+    const deg = (r / R_EARTH_KM) * (180/Math.PI);  // km → degrees
+    const circle = d3.geoCircle().center([lon0, lat0]).radius(deg)();
+    ctx.beginPath(); d3.geoPath().projection(prj).context(ctx)(circle); ctx.stroke();
+  }
+  const [cx, cy] = prj([lon0, lat0]);
+  ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fillStyle='#2c7'; ctx.fill();
+  ctx.restore();
+}
+
+/* ---- Watermark ---- */
+function drawWatermark(ctx, w, h){
+  const text = (localStorage.getItem('pskprop.watermark') || 'Created by OH2XX').trim();
+  if(!text) return;
+  ctx.save();
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.font = '600 13px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+  const tw = ctx.measureText(text).width;
+  const th = 14, padX=10, padY=8;
+  const x = w - tw - padX - 8, y = h - th - padY, r = 8, bw = tw + padX*2, bh = th + padY, bx = x - padX, by = y - th;
+  ctx.beginPath();
+  ctx.moveTo(bx + r, by);
+  ctx.arcTo(bx + bw, by, bx + bw, by + bh, r);
+  ctx.arcTo(bx + bw, by + bh, bx, by + bh, r);
+  ctx.arcTo(bx, by + bh, bx, by, r);
+  ctx.arcTo(bx, by, bx + bw, by, r);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(255,255,255,0.65)'; ctx.fill();
+  ctx.fillStyle = 'rgba(20,20,20,0.7)'; ctx.fillText(text, x, y + 2);
+  ctx.restore();
+}
+
+/* ---- Render ---- */
+function sizeForSnr(snr){ if(snr==null)return 4; const n=Number(snr); if(Number.isNaN(n))return 4; if(n<=-20)return 4; if(n<=0)return 7; return 10; }
+
+function drawScene(){
+  const canvas = document.getElementById('map');
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = Math.floor(w*dpr); canvas.height = Math.floor(h*dpr);
+  const ctx = canvas.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle = '#eaeaea'; ctx.fillRect(0,0,w,h);
+
+  const kind = proj.value;
+  const adapter = drawLandD3(ctx, w, h, kind);
+  if(!adapter) return;
+
+  if(kind === 'aeqd') drawAeqdRings(ctx, adapter);
+
+  const cutoff = unixNow() - currentAgeMinutes()*60;
+  const live = dots.filter(d => { const t = tsToUnix(d.ts); return (t==null || t >= cutoff); });
+
+  for(const d of live){
+    const p = adapter.project([d.lon, d.lat]); if(!p) continue;
+    d._sx = p[0]; d._sy = p[1];
+    const r = sizeForSnr(d.snr);
+    ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI*2);
+    ctx.fillStyle = COLORS[d.band] || '#444'; ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1.0;
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 0.5; ctx.stroke();
+  }
+  count.textContent = live.length + ' spots';
+  drawWatermark(ctx, w, h);
+}
+
+/* ---- Tooltip ---- */
+function onMouseMove(evt){
+  const tip = document.getElementById('tooltip'); if(!tip) return;
+  const canvas = document.getElementById('map'); const rect = canvas.getBoundingClientRect();
+  const x = evt.clientX - rect.left; const y = evt.clientY - rect.top;
+  let best = null, bestDist2 = 12*12;
+  for(const d of dots){ if(d._sx==null) continue; const dx=d._sx-x, dy=d._sy-y; const dist2 = dx*dx+dy*dy; if(dist2<bestDist2){ bestDist2=dist2; best=d; } }
+  if(best){
+    tip.style.display='block'; tip.style.left=(evt.clientX+12)+'px'; tip.style.top=(evt.clientY+12)+'px';
+    const role = best.kind || best.role || ''; const snr=(best.snr!=null)?`${best.snr} dB`:'';
+    tip.innerHTML = [best.band||'', role, snr].filter(Boolean).join(' • ');
+  } else tip.style.display='none';
+}
+
+/* ---- Apply + SSE ---- */
+async function applySettings(){
+  const payload = {
+    home_locator: home.value.trim(),
+    radius_km: parseFloat(radius.value),
+    age_minutes: parseInt(age.value,10),
+    bands: getSelectedBands(),
+    map_type: proj.value
+  };
+  await fetch('/config',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  await loadConfig();
+  dots = []; startSSE(); drawScene(); clearDirty();
+}
+function startSSE(){
+  if(evtSrc) evtSrc.close();
+  try{ evtSrc = new EventSource('/events'); } catch(e){ showError('SSE blocked'); return; }
+  evtSrc.onmessage = (e)=>{
+    if(!e || !e.data) return;
+    try{
+      const msg = JSON.parse(e.data);
+      if(msg.type==='snapshot'){ dots = msg.payload.dots || []; drawScene(); }
+      else if(msg.type==='add'){ dots.push(msg.payload); drawScene(); }
+    }catch(err){}
+  };
+}
+
+/* ---- Wheel zoom (mouse-centered) ---- */
+function onWheelZoom(evt){
+  evt.preventDefault();
+  const kind = proj.value;
+  const zMin = 0.3, zMax = 3.0;
+  const factor = Math.exp(-evt.deltaY * 0.0015);
+  let nextZ = Math.max(zMin, Math.min(zMax, (view.z || 1) * factor));
+
+  // Recenter so the point under the cursor stays fixed
+  const canvas = document.getElementById('map');
+  const rect = canvas.getBoundingClientRect();
+  const mx = (evt.clientX - rect.left) * (window.devicePixelRatio||1) / (window.devicePixelRatio||1);
+  const my = (evt.clientY - rect.top ) * (window.devicePixelRatio||1) / (window.devicePixelRatio||1);
+
+  // Build projection before/after to compute delta in screen space for the same geo point
+  const buildPrj = (z, dx=view.dx, dy=view.dy)=>{
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const prj = makeProjection(kind, w, h);
+    // makeProjection uses global "view". Temporarily override:
+    return (pt)=> prj(pt);
+  };
+
+  // To avoid heavy invert on some projections, approximate by adjusting translate to keep center shift minimal.
+  // If invert exists, do precise lock-on.
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const prjBefore = makeProjection(kind, w, h);
+  if (typeof prjBefore.invert === 'function'){
+    const geo = prjBefore.invert([mx, my]);
+    const oldPt = prjBefore(geo);
+    // update zoom
+    view.z = nextZ;
+    const prjAfter = makeProjection(kind, w, h);
+    const newPt = prjAfter(geo);
+    // shift translate by the screen delta
+    view.dx += (mx - newPt[0]);
+    view.dy += (my - newPt[1]);
+    saveView(kind);
+    drawScene();
+  } else {
+    // Fallback: zoom around center
+    view.z = nextZ;
+    saveView(kind);
+    drawScene();
+  }
+}
+
+/* ---- Drag panning ---- */
+let dragging = false, lastX=0, lastY=0;
+function onDown(e){
+  dragging = true; lastX = e.clientX; lastY = e.clientY; map.classList.add('dragging');
+}
+function onMove(e){
+  if(!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  view.dx += dx; view.dy += dy;
+  lastX = e.clientX; lastY = e.clientY;
+  saveView(proj.value);
+  drawScene();
+}
+function onUp(){ dragging = false; map.classList.remove('dragging'); }
+
+/* ---- Events ---- */
+['home','radius','age'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el){ el.addEventListener('input', markDirty); el.addEventListener('change', markDirty); }
+});
+proj.addEventListener('change', ()=>{
+  loadView(proj.value);
+  drawScene();
+}); // projection applies immediately
+['landfill','landstroke'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el){ el.addEventListener('input', ()=>{ saveLandColors(); drawScene(); }); }
+});
+apply.addEventListener('click', applySettings);
+map.addEventListener('mousemove', onMouseMove);
+map.addEventListener('mouseleave', ()=>{ tooltip.style.display='none'; });
+map.addEventListener('wheel', onWheelZoom, {passive:false});
+map.addEventListener('mousedown', onDown);
+window.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onUp);
+window.addEventListener('resize', drawScene);
+
+/* ---- Init ---- */
+(async function init(){
+  await loadConfig();
+  loadLocalPrefs();
+  loadView(proj.value);
+  await loadLand();
+  startSSE();
+  drawScene();
+})();
+})();
+</script>
+</body>
+</html>
