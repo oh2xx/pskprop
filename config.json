@@ -1,0 +1,23 @@
+{
+  "home_locator": "KP20",
+  "map_type": "aeqd",
+  "radius_km": 400,
+  "age_minutes": 15,
+  "bands": [
+    "20m"
+  ],
+  "snr_sizes": {
+    "low_max": -20,
+    "mid_max": 0
+  },
+  "mqtt": {
+    "host": "mqtt.pskreporter.info",
+    "port": 1883,
+    "keepalive": 60,
+    "topics": [],
+    "client_id": "pskprop-uh2svv",
+    "username": null,
+    "password": null,
+    "use_websockets": false
+  }
+}
