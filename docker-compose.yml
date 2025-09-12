@@ -1,0 +1,15 @@
+services:
+  pskprop:
+    build: .
+    image: pskprop:latest
+    container_name: pskprop
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Europe/Helsinki
+      PSKPROP_CONFIG_DIR: /data
+      PSKPROP_MQTT_HOST: mqtt.pskreporter.info
+      PSKPROP_MQTT_PORT: "1883"
+    volumes:
+      - ./data:/data
