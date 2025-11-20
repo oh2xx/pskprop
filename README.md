@@ -3,6 +3,8 @@
 A lightweight HF propagation viewer that listens to **PSKReporter via MQTT** and draws **band-colored spots** on an interactive world map (Robinson / Mercator / Great-circle AEQD).  
 Built with **FastAPI** (backend) and **HTML5 Canvas + d3-geo** (frontend).
 
+<img src="images/screenshot.png" width="900">
+
 ## What it shows
 
 - **Sender spot:** the station at that location **transmitted** a signal that was **received within your selected radius** from your home grid.
