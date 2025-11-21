@@ -1,5 +1,5 @@
-
 import asyncio, json, math, os, threading, time
+import uuid
 from collections import deque
 from dataclasses import dataclass, asdict
 from typing import Optional, Tuple, List
@@ -186,7 +186,8 @@ def on_message(client, userdata, msg):
 def mqtt_thread():
     global MQTT_CLIENT, CURRENT_TOPICS, TOPICS
     cfg = CONFIG.get("mqtt", {})
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=cfg.get("client_id","pskprop"))
+    random_client_id = f"pskprop-{uuid.uuid4()}"  # Generate a random client_id
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=random_client_id)
     MQTT_CLIENT = client
     client.on_connect = on_connect
     client.on_message = on_message

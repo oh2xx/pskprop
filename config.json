@@ -15,7 +15,7 @@
     "port": 1883,
     "keepalive": 60,
     "topics": [],
-    "client_id": "pskprop-YOURCALLSIGN",
+    "client_id": null,
     "username": null,
     "password": null,
     "use_websockets": false
