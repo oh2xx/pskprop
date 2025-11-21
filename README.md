@@ -34,6 +34,11 @@ Please be mindful of **PSKReporter’s usage policies** and network load (keep f
 
 ## Install & run (Windows)
 
+1. Copy config.example.json -> config.json
+2. Edit "client_id" in config.json and change pskprop-YOURCALLSIGN to something unique
+   (e.g. pskprop-OH2XXXX).
+
+
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
