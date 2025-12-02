@@ -52,7 +52,11 @@
       <label style="margin-left:8px;">Land:</label>
       <input id="landfill" type="color" value="#dfe7ee" title="Land fill"/>
       <input id="landstroke" type="color" value="#9db6c7" title="Land outline">
-      <button id="apply" style="margin-left:8px;">Apply</button>
+      <label style="margin-left:8px;">
+        <input id="graylineToggle" type="checkbox" checked>
+        Grayline
+    </label>
+    <button id="apply" style="margin-left:8px;">Apply</button>
     </div>
     <div class="legend-row">
       <div class="legend" id="legend"></div>
@@ -179,6 +183,7 @@ let homeLatLon = [0,0];   // [lat, lon]
 let dots = [];
 let evtSrc = null;
 let LAND = null;
+let showGrayline = true;
 
 /* View state per projection (mouse-wheel zoom & drag-pan) */
 const VIEW_KEYS = {
@@ -382,7 +387,9 @@ function drawScene(){
   if(kind === 'aeqd') drawAeqdRings(ctx, adapter);
 
   // --- draw grayline overlay between land and spots ---
+  if (showGrayline) {
   drawGraylineOverlay(ctx, adapter);
+}
 
   // Now draw the spots on top
   const cutoff = unixNow() - currentAgeMinutes()*60;
@@ -515,6 +522,18 @@ proj.addEventListener('change', ()=>{
   const el=document.getElementById(id);
   if(el){ el.addEventListener('input', ()=>{ saveLandColors(); drawScene(); }); }
 });
+
+const grayToggle = document.getElementById('graylineToggle');
+if (grayToggle) {
+  // Initial sync (in case you later change default checked in HTML)
+  showGrayline = grayToggle.checked;
+
+  grayToggle.addEventListener('change', () => {
+    showGrayline = grayToggle.checked;
+    drawScene();
+  });
+}
+
 apply.addEventListener('click', applySettings);
 map.addEventListener('mousemove', onMouseMove);
 map.addEventListener('mouseleave', ()=>{ tooltip.style.display='none'; });
