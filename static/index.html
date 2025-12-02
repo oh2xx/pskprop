@@ -69,6 +69,111 @@
 const R_EARTH_KM = 6371.0088;
 const BANDS_ORDER = ["160m","80m","40m","30m","20m","17m","15m","12m","10m","6m"];
 
+// --- Grayline / solar position helpers ---
+// Based on NOAA solar position equations (as used in the classic D3 solar terminator examples).
+const PI = Math.PI;
+const RAD = PI / 180;
+const DEG = 180 / PI;
+
+// Cache for the night hemisphere polygon (GeoJSON) so we only recompute once per minute
+let nightPolygon = null;
+let lastNightUpdate = 0;
+
+// Subsolar point: returns [lon, lat] where the sun is directly overhead (degrees)
+function solarPosition(date) {
+  const t = date.getTime();
+  const centuries = (t - Date.UTC(2000, 0, 1, 12)) / 86400000 / 36525; // centuries since J2000
+
+  // Start of current UTC day
+  const dayStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  const longitude = (dayStart - t) / 86400000 * 360 - 180;
+
+  return [
+    longitude - equationOfTime(centuries) * DEG,
+    solarDeclination(centuries) * DEG
+  ];
+}
+
+// Antipode: opposite side of the Earth
+function antipode(pos) {
+  let lon = pos[0] + 180;
+  if (lon > 180) lon -= 360;
+  return [lon, -pos[1]];
+}
+
+// NOAA-based helpers (angles in radians)
+function equationOfTime(T) {
+  const e = eccentricityEarthOrbit(T);
+  const m = solarGeometricMeanAnomaly(T);
+  const l = solarGeometricMeanLongitude(T);
+  const y = Math.tan(obliquityCorrection(T) / 2);
+  const y2 = y * y;
+  return y2 * Math.sin(2 * l)
+       - 2 * e * Math.sin(m)
+       + 4 * e * y2 * Math.sin(m) * Math.cos(2 * l)
+       - 0.5 * y2 * y2 * Math.sin(4 * l)
+       - 1.25 * e * e * Math.sin(2 * m);
+}
+
+function solarDeclination(T) {
+  return Math.asin(Math.sin(obliquityCorrection(T)) * Math.sin(solarApparentLongitude(T)));
+}
+
+function solarApparentLongitude(T) {
+  return solarTrueLongitude(T) - (0.00569 + 0.00478 * Math.sin((125.04 - 1934.136 * T) * RAD)) * RAD;
+}
+
+function solarTrueLongitude(T) {
+  return solarGeometricMeanLongitude(T) + solarEquationOfCenter(T);
+}
+
+function solarGeometricMeanAnomaly(T) {
+  return (357.52911 + T * (35999.05029 - 0.0001537 * T)) * RAD;
+}
+
+function solarGeometricMeanLongitude(T) {
+  let L = (280.46646 + T * (36000.76983 + T * 0.0003032)) % 360;
+  if (L < 0) L += 360;
+  return L * RAD;
+}
+
+function solarEquationOfCenter(T) {
+  const m = solarGeometricMeanAnomaly(T);
+  return (
+    Math.sin(m) * (1.914602 - T * (0.004817 + 0.000014 * T)) +
+    Math.sin(2 * m) * (0.019993 - 0.000101 * T) +
+    Math.sin(3 * m) * 0.000289
+  ) * RAD;
+}
+
+function obliquityCorrection(T) {
+  const eps0 = meanObliquityOfEcliptic(T);
+  return eps0 + 0.00256 * Math.cos((125.04 - 1934.136 * T) * RAD) * RAD;
+}
+
+function meanObliquityOfEcliptic(T) {
+  return (23 + (26 + (21.448 - T * (46.8150 + T * (0.00059 - 0.001813 * T))) / 60) / 60) * RAD;
+}
+
+function eccentricityEarthOrbit(T) {
+  return 0.016708634 - T * (0.000042037 + 0.0000001267 * T);
+}
+
+// Build (and cache) the night hemisphere polygon (GeoJSON)
+const nightCircle = d3.geoCircle().radius(90); // 90° = half the globe
+
+function getNightPolygon(now) {
+  const t = now.getTime();
+  if (!nightPolygon || t - lastNightUpdate > 60000) { // recompute at most once per minute
+    const sun = solarPosition(now);        // [lon, lat] subsolar
+    const anti = antipode(sun);           // center of night side
+    nightPolygon = nightCircle.center(anti)();  // GeoJSON Polygon
+    lastNightUpdate = t;
+  }
+  return nightPolygon;
+}
+
+
 let COLORS = {};
 let homeLatLon = [0,0];   // [lat, lon]
 let dots = [];
@@ -221,6 +326,22 @@ function drawAeqdRings(ctx, adapter){
   ctx.restore();
 }
 
+function drawGraylineOverlay(ctx, adapter) {
+  const poly = getNightPolygon(new Date());
+  if (!poly || !adapter || !adapter.projection) return;
+
+  const path = d3.geoPath().projection(adapter.projection).context(ctx);
+
+  ctx.save();
+  ctx.beginPath();
+  path(poly);
+  // Night side in semi-transparent gray, so the map remains visible
+  ctx.fillStyle = "rgba(120, 120, 120, 0.30)";
+  ctx.fill();
+  ctx.restore();
+}
+
+
 /* ---- Watermark ---- */
 function drawWatermark(ctx, w, h){
   const text = (localStorage.getItem('pskprop.watermark') || 'Created by OH2XX').trim();
@@ -260,8 +381,13 @@ function drawScene(){
 
   if(kind === 'aeqd') drawAeqdRings(ctx, adapter);
 
+  // --- draw grayline overlay between land and spots ---
+  drawGraylineOverlay(ctx, adapter);
+
+  // Now draw the spots on top
   const cutoff = unixNow() - currentAgeMinutes()*60;
   const live = dots.filter(d => { const t = tsToUnix(d.ts); return (t==null || t >= cutoff); });
+
 
   for(const d of live){
     const p = adapter.project([d.lon, d.lat]); if(!p) continue;
@@ -397,6 +523,12 @@ map.addEventListener('mousedown', onDown);
 window.addEventListener('mousemove', onMove);
 window.addEventListener('mouseup', onUp);
 window.addEventListener('resize', drawScene);
+
+// Force grayline redraw at least once per minute, even if no new spots arrive
+setInterval(() => {
+  nightPolygon = null;  // invalidate cache so getNightPolygon recomputes
+  drawScene();
+}, 60000);
 
 /* ---- Init ---- */
 (async function init(){
