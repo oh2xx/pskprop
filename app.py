@@ -71,7 +71,7 @@ def band_of_frequency(freq_hz: Optional[int]) -> Optional[str]:
 BAND_COLORS = {
     "160m":"#8B4513","80m":"#4B0082","40m":"#00008B","30m":"#008B8B",
     "20m":"#006400","17m":"#228B22","15m":"#8B8B00","12m":"#B8860B",
-    "10m":"#B22222","6m":"#2F4F4F",
+    "10m":"#B22222","6m":"#FF69B4",
 }
 
 def load_config() -> dict:
