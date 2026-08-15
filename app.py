@@ -70,7 +70,7 @@ def band_of_frequency(freq_hz: Optional[int]) -> Optional[str]:
 
 BAND_COLORS = {
     "160m":"#8B4513","80m":"#4B0082","40m":"#00008B","30m":"#137A7A",
-    "20m":"#E9E512","17m":"#386624","15m":"#2ECE0E","12m":"#B8590B",
+    "20m":"#C7C41AFF","17m":"#396925","15m":"#21BE02FF","12m":"#B8590B",
     "10m":"#B22222","6m":"#FF0080",
 }
 
